@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
-use serde::{Deserialize, de::DeserializeOwned, Serialize};
+use serde::{Deserialize, Deserializer, de::DeserializeOwned, Serialize};
 use std::{
     any::{TypeId},
     collections::HashMap,
@@ -12,6 +12,11 @@ pub trait TableValue: erased_serde::Serialize + Send + Sync + 'static {
     fn type_id(&self, _: private::Internal) -> TypeId {
         TypeId::of::<Self>()
     }
+
+    fn deserialize<'de, D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        Self: Sized,
+        D: Deserializer<'de>;
 }
 
 impl dyn TableValue {
@@ -40,8 +45,16 @@ impl dyn TableValue {
 
 impl<T> TableValue for T
 where
-    T: Serialize + Send + Sync + 'static
-{}
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    fn deserialize<'de, D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        Self: Sized,
+        D: Deserializer<'de>,
+    {
+        Deserialize::deserialize(deserializer)
+    }
+}
 
 pub struct TableId<K: Serialize, V: TableValue> {
     pub id: u64,
@@ -78,7 +91,7 @@ impl Storage {
     }
 
     fn ensure_cached_table_entry<
-        V: TableValue + DeserializeOwned,
+        V: TableValue,
     >(
         &mut self,
         table_entry: &TableEntry,
@@ -90,17 +103,18 @@ impl Storage {
             return Ok(());
         }
         let bytes = self.database.get(table_entry).unwrap();
-        let value = serde_json::from_slice::<V>(bytes)?;
+        let mut de = serde_json::Deserializer::from_slice(bytes);
+        let value = V::deserialize(&mut de)?;
         self.entries.insert(table_entry.clone(), Box::new(value));
         Ok(())
     }
 
     pub fn contains_table_entry<
         K: Serialize,
-        V: TableValue + DeserializeOwned,
+        V: TableValue,
     >(
         &mut self,
-        table_id: &TableId<K, V>,gi
+        table_id: &TableId<K, V>,
         key: &K,
     ) -> Result<bool> {
         let table_entry = TableEntry::from_key(table_id.id, &key);
@@ -115,7 +129,7 @@ impl Storage {
 
     pub fn put_table_entry<
         K: Serialize,
-        V: TableValue + DeserializeOwned,
+        V: TableValue,
     >(&mut self, table_id: &TableId<K, V>, key: K, value: V) {
         let table_entry = TableEntry::from_key(table_id.id, &key);
         let mut writer = Vec::new();
@@ -128,7 +142,7 @@ impl Storage {
 
     pub fn borrow_table_entry<
         K: Serialize,
-        V: TableValue + DeserializeOwned,
+        V: TableValue,
     >(
         &mut self,
         table_id: &TableId<K, V>,
@@ -142,7 +156,7 @@ impl Storage {
 
     pub fn borrow_table_entry_mut<
         K: Serialize,
-        V: TableValue + DeserializeOwned,
+        V: TableValue,
     >(
         &mut self,
         table_id: &TableId<K, V>,
