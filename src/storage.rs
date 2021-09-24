@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, de::DeserializeOwned, Serialize};
 use std::{
-    any::{Any, TypeId},
+    any::{TypeId},
     collections::HashMap,
     marker::PhantomData,
 };
@@ -40,7 +40,7 @@ impl dyn TableValue {
 
 impl<T> TableValue for T
 where
-    T: Serialize + Any + Send + Sync + 'static
+    T: Serialize + Send + Sync + 'static
 {}
 
 pub struct TableId<K: Serialize, V: TableValue> {
@@ -66,45 +66,90 @@ impl TableEntry {
 
 pub struct Storage {
     entries: HashMap<TableEntry, Box<dyn TableValue>>,
+    database: HashMap<TableEntry, Vec<u8>>,
 }
 
 impl Storage {
     pub fn new() -> Storage {
         Storage {
             entries: HashMap::new(),
+            database: HashMap::new(),
         }
+    }
+
+    fn ensure_cached_table_entry<
+        V: TableValue + DeserializeOwned,
+    >(
+        &mut self,
+        table_entry: &TableEntry,
+    ) -> Result<()> {
+        if self.entries.contains_key(table_entry) {
+            return Ok(());
+        }
+        if !self.database.contains_key(table_entry) {
+            return Ok(());
+        }
+        let bytes = self.database.get(table_entry).unwrap();
+        let value = serde_json::from_slice::<V>(bytes)?;
+        self.entries.insert(table_entry.clone(), Box::new(value));
+        Ok(())
+    }
+
+    pub fn contains_table_entry<
+        K: Serialize,
+        V: TableValue + DeserializeOwned,
+    >(
+        &mut self,
+        table_id: &TableId<K, V>,gi
+        key: &K,
+    ) -> Result<bool> {
+        let table_entry = TableEntry::from_key(table_id.id, &key);
+        if self.entries.contains_key(&table_entry) {
+            return Ok(true);
+        }
+        if self.database.contains_key(&table_entry) {
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub fn put_table_entry<
         K: Serialize,
-        V: TableValue,
+        V: TableValue + DeserializeOwned,
     >(&mut self, table_id: &TableId<K, V>, key: K, value: V) {
         let table_entry = TableEntry::from_key(table_id.id, &key);
+        let mut writer = Vec::new();
+        let mut json_serializer = serde_json::Serializer::new(&mut writer);
+        let mut erased_json_serializer = <dyn erased_serde::Serializer>::erase(&mut json_serializer);
+        value.erased_serialize(&mut erased_json_serializer).unwrap();
+        self.database.insert(table_entry.clone(), writer);
         self.entries.insert(table_entry, Box::new(value));
     }
 
     pub fn borrow_table_entry<
         K: Serialize,
-        V: TableValue,
+        V: TableValue + DeserializeOwned,
     >(
         &mut self,
         table_id: &TableId<K, V>,
         key: &K,
     ) -> Result<&V> {
         let table_entry = TableEntry::from_key(table_id.id, &key);
+        self.ensure_cached_table_entry::<V>(&table_entry)?;
         let entry = self.entries.get(&table_entry).unwrap();
         Ok(entry.downcast_ref::<V>().unwrap())
     }
 
     pub fn borrow_table_entry_mut<
         K: Serialize,
-        V: TableValue,
+        V: TableValue + DeserializeOwned,
     >(
         &mut self,
         table_id: &TableId<K, V>,
         key: &K,
     ) -> Result<&mut V> {
         let table_entry = TableEntry::from_key(table_id.id, &key);
+        self.ensure_cached_table_entry::<V>(&table_entry)?;
         let entry = self.entries.get_mut(&table_entry).unwrap();
         Ok(entry.downcast_mut::<V>().unwrap())
     }
